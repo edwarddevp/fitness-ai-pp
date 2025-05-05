@@ -3,8 +3,17 @@ import { WebhookEvent } from "@clerk/nextjs/server";
 import { Webhook } from "svix";
 import { api } from "./_generated/api";
 import { httpAction } from "./_generated/server";
+import { GoogleGenAI } from "@google/genai";
+import {
+  getDietPropmt,
+  getWorkoutPropmt,
+  validateDietPlan,
+  validateWorkoutPlan,
+} from "../src/lib/genAi";
 
 const http = httpRouter();
+
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 http.route({
   path: "/clerk-webhook",
@@ -66,6 +75,101 @@ http.route({
     }
 
     return new Response("Webhook processed successfully", { status: 200 });
+  }),
+});
+
+http.route({
+  path: "/vapi/generate-program",
+  method: "POST",
+  handler: httpAction(async (ctx, req) => {
+    try {
+      const payload = await req.json();
+
+      const {
+        user_id,
+        age,
+        height,
+        weight,
+        injuries,
+        workout_days,
+        fitness_goal,
+        fitness_level,
+        dietary_restrictions,
+      } = payload;
+
+      const workoutPrompt = getWorkoutPropmt(
+        age,
+        height,
+        weight,
+        injuries,
+        workout_days,
+        fitness_goal,
+        fitness_level
+      );
+
+      const workoutResult = await ai.models.generateContent({
+        model: "gemini-2.0-flash-001",
+        contents: workoutPrompt,
+        config: {
+          temperature: 0.4,
+          topP: 0.9,
+          responseMimeType: "application/json",
+        },
+      });
+
+      let workoutPlan = JSON.parse(workoutResult.text ?? "");
+      workoutPlan = validateWorkoutPlan(workoutPlan);
+
+      const dietPrompt = getDietPropmt(
+        age,
+        height,
+        weight,
+        dietary_restrictions,
+        fitness_goal
+      );
+
+      const dietResult = await ai.models.generateContent({
+        model: "gemini-2.0-flash-001",
+        contents: dietPrompt,
+        config: {
+          temperature: 0.4,
+          topP: 0.9,
+          responseMimeType: "application/json",
+        },
+      });
+
+      let dietPlan = JSON.parse(dietResult.text ?? "");
+      dietPlan = validateDietPlan(dietPlan);
+
+      const planId = await ctx.runMutation(api.plan.createPlan, {
+        userId: user_id,
+        name: `${fitness_goal} Plan - ${new Date().toLocaleDateString()}`,
+        workoutPlan: workoutPlan,
+        dietPlan: dietPlan,
+        isActive: true,
+      });
+
+      return new Response(
+        JSON.stringify({
+          success: true,
+          data: {
+            planId,
+            workoutPlan,
+            dietPlan,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    } catch (error) {
+      console.error("Error generating program", error);
+      return new Response(
+        JSON.stringify({
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+        { status: 500, headers: { "Content-Type": "application/json" } }
+      );
+    }
   }),
 });
 
